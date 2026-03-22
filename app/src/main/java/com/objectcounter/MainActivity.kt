@@ -17,6 +17,7 @@ import com.objectcounter.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -38,17 +39,16 @@ class MainActivity : AppCompatActivity() {
         bitmap?.let {
             currentBitmap = it
             binding.imageView.setImageBitmap(it)
-            binding.btnDetect.isEnabled = true
+            binding.btnDetect.isEnabled = detector.isModelLoaded
             binding.resultCard.visibility = View.GONE
+            binding.placeholderText.visibility = View.GONE
         }
     }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        if (permissions[Manifest.permission.CAMERA] == true) {
-            openCamera()
-        }
+        if (permissions[Manifest.permission.CAMERA] == true) openCamera()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,7 +58,35 @@ class MainActivity : AppCompatActivity() {
 
         detector = ObjectDetector(this)
 
+        // Check if model needs downloading
+        if (!detector.isModelLoaded) {
+            showModelDownloadUI()
+        }
+
         setupUI()
+    }
+
+    private fun showModelDownloadUI() {
+        binding.placeholderText.text = "⬇️ YOLOv8 model download කරනවා...\nInternet connection ඕනේ (6MB)"
+        binding.btnDetect.isEnabled = false
+
+        lifecycleScope.launch {
+            val success = ModelDownloader.downloadModel(this@MainActivity) { progress ->
+                binding.placeholderText.text = "⬇️ Model downloading... $progress%"
+            }
+            if (success) {
+                detector.reloadModel()
+                if (detector.isModelLoaded) {
+                    binding.placeholderText.text = "✅ Model ready!\n📷 Camera හෝ Gallery එකෙන් image select කරන්න"
+                    if (currentBitmap != null) binding.btnDetect.isEnabled = true
+                    Toast.makeText(this@MainActivity, "Model loaded!", Toast.LENGTH_SHORT).show()
+                } else {
+                    binding.placeholderText.text = "❌ Model load failed. App restart කරන්න."
+                }
+            } else {
+                binding.placeholderText.text = "❌ Download failed.\nInternet check කරලා app restart කරන්න."
+            }
+        }
     }
 
     private fun setupUI() {
@@ -77,27 +105,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnDetect.setOnClickListener {
+            if (!detector.isModelLoaded) {
+                Toast.makeText(this, "Model still loading...", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             currentBitmap?.let { detectObjects(it) }
         }
 
-        binding.btnReset.setOnClickListener {
-            resetUI()
-        }
+        binding.btnReset.setOnClickListener { resetUI() }
     }
 
-    private fun openCamera() {
-        cameraLauncher.launch(null)
-    }
+    private fun openCamera() { cameraLauncher.launch(null) }
 
     private fun loadImageFromUri(uri: Uri) {
         try {
             val inputStream = contentResolver.openInputStream(uri)
             val bitmap = BitmapFactory.decodeStream(inputStream)
             inputStream?.close()
-
             currentBitmap = bitmap
             binding.imageView.setImageBitmap(bitmap)
-            binding.btnDetect.isEnabled = true
+            binding.btnDetect.isEnabled = detector.isModelLoaded
             binding.resultCard.visibility = View.GONE
             binding.placeholderText.visibility = View.GONE
         } catch (e: Exception) {
@@ -112,13 +139,10 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                val results = withContext(Dispatchers.Default) {
-                    detector.detect(bitmap)
-                }
+                val results = withContext(Dispatchers.Default) { detector.detect(bitmap) }
                 displayResults(bitmap, results)
             } catch (e: Exception) {
-                Toast.makeText(this@MainActivity,
-                    "Detection error: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "Detection error: ${e.message}", Toast.LENGTH_LONG).show()
             } finally {
                 binding.progressBar.visibility = View.GONE
                 binding.btnDetect.isEnabled = true
@@ -128,29 +152,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun displayResults(bitmap: Bitmap, detections: List<Detection>) {
-        // Draw bounding boxes
         val resultBitmap = drawBoundingBoxes(bitmap.copy(Bitmap.Config.ARGB_8888, true), detections)
         binding.imageView.setImageBitmap(resultBitmap)
 
-        // Count by class
         val countMap = mutableMapOf<String, Int>()
-        detections.forEach { det ->
-            countMap[det.label] = (countMap[det.label] ?: 0) + 1
-        }
+        detections.forEach { countMap[it.label] = (countMap[it.label] ?: 0) + 1 }
 
-        // Update UI
-        binding.totalCount.text = detections.size.toString()
+        animateCount(detections.size)
         binding.resultCard.visibility = View.VISIBLE
 
-        // Build object list text
         val sb = StringBuilder()
         countMap.entries.sortedByDescending { it.value }.forEach { (label, count) ->
             sb.append("• $label: $count\n")
         }
-        binding.objectList.text = sb.toString().trimEnd()
-
-        // Animate count
-        animateCount(detections.size)
+        binding.objectList.text = if (sb.isEmpty()) "Objects not detected" else sb.toString().trimEnd()
     }
 
     private fun drawBoundingBoxes(bitmap: Bitmap, detections: List<Detection>): Bitmap {
@@ -161,52 +176,29 @@ class MainActivity : AppCompatActivity() {
             Color.parseColor("#FFEB3B"), Color.parseColor("#CE93D8"),
             Color.parseColor("#80CBC4"), Color.parseColor("#F48FB1")
         )
-
         val classColorMap = mutableMapOf<String, Int>()
         var colorIndex = 0
 
         detections.forEach { det ->
-            val color = classColorMap.getOrPut(det.label) {
-                colors[colorIndex++ % colors.size]
-            }
-
-            val boxPaint = Paint().apply {
-                this.color = color
-                style = Paint.Style.STROKE
-                strokeWidth = bitmap.width * 0.004f
-            }
-
-            val bgPaint = Paint().apply {
-                this.color = color
-                style = Paint.Style.FILL
-                alpha = 200
-            }
-
-            val textPaint = Paint().apply {
-                this.color = Color.BLACK
-                textSize = bitmap.width * 0.030f
-                typeface = Typeface.DEFAULT_BOLD
-            }
+            val color = classColorMap.getOrPut(det.label) { colors[colorIndex++ % colors.size] }
+            val boxPaint = Paint().apply { this.color = color; style = Paint.Style.STROKE; strokeWidth = bitmap.width * 0.004f }
+            val bgPaint = Paint().apply { this.color = color; style = Paint.Style.FILL; alpha = 200 }
+            val textPaint = Paint().apply { this.color = Color.BLACK; textSize = bitmap.width * 0.030f; typeface = Typeface.DEFAULT_BOLD }
 
             val left = det.boundingBox.left * bitmap.width
             val top = det.boundingBox.top * bitmap.height
             val right = det.boundingBox.right * bitmap.width
             val bottom = det.boundingBox.bottom * bitmap.height
 
-            // Draw box
             canvas.drawRect(left, top, right, bottom, boxPaint)
-
-            // Draw label background
             val labelText = "${det.label} ${(det.confidence * 100).toInt()}%"
-            val textWidth = textPaint.measureText(labelText)
-            val textHeight = textPaint.textSize
-            val labelTop = if (top > textHeight + 8) top - textHeight - 8 else top
-            canvas.drawRect(left, labelTop, left + textWidth + 12, labelTop + textHeight + 8, bgPaint)
-
-            // Draw label text
-            canvas.drawText(labelText, left + 6, labelTop + textHeight + 2, textPaint)
+            val tw = textPaint.measureText(labelText)
+            val th = textPaint.textSize
+            val ly = if (top > th + 8) top - th - 8 else top
+            canvas.drawRect(left, ly, left + tw + 12, ly + th + 8, bgPaint)
+            textPaint.color = Color.BLACK
+            canvas.drawText(labelText, left + 6, ly + th + 2, textPaint)
         }
-
         return bitmap
     }
 
@@ -214,14 +206,11 @@ class MainActivity : AppCompatActivity() {
         var current = 0
         val handler = android.os.Handler(mainLooper)
         val step = if (target > 20) target / 20 else 1
-
         val runnable = object : Runnable {
             override fun run() {
                 current = minOf(current + step, target)
                 binding.totalCount.text = current.toString()
-                if (current < target) {
-                    handler.postDelayed(this, 40)
-                }
+                if (current < target) handler.postDelayed(this, 40)
             }
         }
         handler.post(runnable)
@@ -231,6 +220,7 @@ class MainActivity : AppCompatActivity() {
         currentBitmap = null
         binding.imageView.setImageResource(android.R.color.transparent)
         binding.placeholderText.visibility = View.VISIBLE
+        binding.placeholderText.text = "📷 Camera හෝ Gallery\nඑකෙන් image select කරන්න"
         binding.btnDetect.isEnabled = false
         binding.resultCard.visibility = View.GONE
         binding.totalCount.text = "0"

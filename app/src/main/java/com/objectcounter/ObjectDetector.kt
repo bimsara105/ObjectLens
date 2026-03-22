@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.RectF
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
+import java.io.File
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -21,9 +22,11 @@ class ObjectDetector(private val context: Context) {
 
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
+    var isModelLoaded: Boolean = false
+        private set
 
     companion object {
-        private const val MODEL_FILE = "yolov8n.tflite"
+        const val MODEL_FILE = "yolov8n.tflite"
         private const val INPUT_SIZE = 640
         private const val CONF_THRESHOLD = 0.35f
         private const val IOU_THRESHOLD = 0.45f
@@ -50,24 +53,45 @@ class ObjectDetector(private val context: Context) {
     }
 
     private fun loadModel() {
+        // Try assets first
         try {
-            val modelBuffer = loadModelFile()
+            val modelBuffer = loadModelFromAssets()
             val options = Interpreter.Options().apply {
                 setNumThreads(4)
                 try {
                     gpuDelegate = GpuDelegate()
                     addDelegate(gpuDelegate!!)
-                } catch (e: Exception) {
-                    // GPU not available, use CPU
-                }
+                } catch (e: Exception) { /* GPU not available */ }
             }
             interpreter = Interpreter(modelBuffer, options)
+            isModelLoaded = true
+            return
+        } catch (e: Exception) { /* not in assets */ }
+
+        // Try filesDir (downloaded model)
+        try {
+            val modelFile = File(context.filesDir, MODEL_FILE)
+            if (modelFile.exists()) {
+                val options = Interpreter.Options().apply { setNumThreads(4) }
+                interpreter = Interpreter(modelFile, options)
+                isModelLoaded = true
+            } else {
+                isModelLoaded = false
+            }
         } catch (e: Exception) {
-            e.printStackTrace()
+            isModelLoaded = false
         }
     }
 
-    private fun loadModelFile(): MappedByteBuffer {
+    fun reloadModel() {
+        interpreter?.close()
+        interpreter = null
+        gpuDelegate?.close()
+        gpuDelegate = null
+        loadModel()
+    }
+
+    private fun loadModelFromAssets(): MappedByteBuffer {
         val assetFileDescriptor = context.assets.openFd(MODEL_FILE)
         val inputStream = FileInputStream(assetFileDescriptor.fileDescriptor)
         val fileChannel = inputStream.channel
@@ -80,43 +104,33 @@ class ObjectDetector(private val context: Context) {
 
     fun detect(bitmap: Bitmap): List<Detection> {
         val interpreter = this.interpreter ?: return emptyList()
+        if (!isModelLoaded) return emptyList()
 
-        // Preprocess
         val resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
         val inputBuffer = bitmapToByteBuffer(resized)
-
-        // YOLOv8 output: [1, 84, 8400]
         val outputArray = Array(1) { Array(84) { FloatArray(8400) } }
 
         interpreter.run(inputBuffer, outputArray)
-
         return postProcess(outputArray[0], bitmap.width, bitmap.height)
     }
 
     private fun bitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
         val buffer = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4)
         buffer.order(ByteOrder.nativeOrder())
-
         val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
         bitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
-
         for (pixel in pixels) {
-            buffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f) // R
-            buffer.putFloat(((pixel shr 8) and 0xFF) / 255.0f)  // G
-            buffer.putFloat((pixel and 0xFF) / 255.0f)           // B
+            buffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f)
+            buffer.putFloat(((pixel shr 8) and 0xFF) / 255.0f)
+            buffer.putFloat((pixel and 0xFF) / 255.0f)
         }
-
         buffer.rewind()
         return buffer
     }
 
-    private fun postProcess(
-        output: Array<FloatArray>,
-        imgWidth: Int,
-        imgHeight: Int
-    ): List<Detection> {
+    private fun postProcess(output: Array<FloatArray>, imgWidth: Int, imgHeight: Int): List<Detection> {
         val detections = mutableListOf<Detection>()
-        val numDetections = output[0].size // 8400
+        val numDetections = output[0].size
 
         for (i in 0 until numDetections) {
             val cx = output[0][i]
@@ -124,52 +138,36 @@ class ObjectDetector(private val context: Context) {
             val w  = output[2][i]
             val h  = output[3][i]
 
-            // Find best class
             var maxConf = 0f
             var maxIdx = 0
             for (c in 0 until NUM_CLASSES) {
                 val conf = output[4 + c][i]
-                if (conf > maxConf) {
-                    maxConf = conf
-                    maxIdx = c
-                }
+                if (conf > maxConf) { maxConf = conf; maxIdx = c }
             }
 
             if (maxConf >= CONF_THRESHOLD) {
-                // Convert to normalized coords
                 val x1 = (cx - w / 2f) / INPUT_SIZE
                 val y1 = (cy - h / 2f) / INPUT_SIZE
                 val x2 = (cx + w / 2f) / INPUT_SIZE
                 val y2 = (cy + h / 2f) / INPUT_SIZE
-
-                detections.add(
-                    Detection(
-                        label = COCO_LABELS.getOrElse(maxIdx) { "object" },
-                        confidence = maxConf,
-                        boundingBox = RectF(
-                            x1.coerceIn(0f, 1f),
-                            y1.coerceIn(0f, 1f),
-                            x2.coerceIn(0f, 1f),
-                            y2.coerceIn(0f, 1f)
-                        )
-                    )
-                )
+                detections.add(Detection(
+                    label = COCO_LABELS.getOrElse(maxIdx) { "object" },
+                    confidence = maxConf,
+                    boundingBox = RectF(x1.coerceIn(0f,1f), y1.coerceIn(0f,1f), x2.coerceIn(0f,1f), y2.coerceIn(0f,1f))
+                ))
             }
         }
-
         return applyNMS(detections)
     }
 
     private fun applyNMS(detections: List<Detection>): List<Detection> {
         val sorted = detections.sortedByDescending { it.confidence }.toMutableList()
         val result = mutableListOf<Detection>()
-
         while (sorted.isNotEmpty()) {
             val best = sorted.removeAt(0)
             result.add(best)
             sorted.removeAll { iou(best.boundingBox, it.boundingBox) > IOU_THRESHOLD }
         }
-
         return result
     }
 
@@ -178,14 +176,9 @@ class ObjectDetector(private val context: Context) {
         val interTop    = maxOf(a.top, b.top)
         val interRight  = minOf(a.right, b.right)
         val interBottom = minOf(a.bottom, b.bottom)
-
         if (interRight <= interLeft || interBottom <= interTop) return 0f
-
         val interArea = (interRight - interLeft) * (interBottom - interTop)
-        val aArea = a.width() * a.height()
-        val bArea = b.width() * b.height()
-
-        return interArea / (aArea + bArea - interArea)
+        return interArea / (a.width() * a.height() + b.width() * b.height() - interArea)
     }
 
     fun close() {
