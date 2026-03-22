@@ -9,3 +9,5 @@
 .cxx
 local.properties
 app/src/main/assets/*.tflite
+# DO NOT ignore gradle wrapper jar
+!gradle/wrapper/gradle-wrapper.jar
