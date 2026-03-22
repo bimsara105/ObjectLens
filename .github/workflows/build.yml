@@ -23,12 +23,22 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          api-level: 35
+          build-tools: 35.0.0
 
       - name: Download Gradle Wrapper JAR
         run: |
           mkdir -p gradle/wrapper
           curl -L "https://github.com/gradle/gradle/raw/v8.1.1/gradle/wrapper/gradle-wrapper.jar" \
-            -o gradle/wrapper/gradle-wrapper.jar
+            -o gradle/wrapper/gradle-wrapper.jar 2>/dev/null || \
+          wget -q "https://raw.githubusercontent.com/gradle/gradle/v8.1.1/gradle/wrapper/gradle-wrapper.jar" \
+            -O gradle/wrapper/gradle-wrapper.jar 2>/dev/null || true
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            curl -L "https://services.gradle.org/distributions/gradle-8.1.1-bin.zip" -o /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /tmp/gradle-dist
+            find /tmp/gradle-dist -name "gradle-wrapper*.jar" -exec cp {} gradle/wrapper/gradle-wrapper.jar \;
+          fi
           ls -lh gradle/wrapper/
 
       - name: Grant execute permission for gradlew
@@ -71,3 +81,13 @@ jobs:
           name: ObjectLens-release
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
+
+      - name: Create Release on Tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/release/app-release.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
