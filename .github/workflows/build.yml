@@ -22,16 +22,10 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Download Gradle Wrapper JAR
-        run: |
-          mkdir -p gradle/wrapper
-          curl -L "https://github.com/nicowillis/gradle-wrapper-jar/raw/main/gradle-wrapper.jar" \
-            -o gradle/wrapper/gradle-wrapper.jar || \
-          wget -q "https://raw.githubusercontent.com/gradle/gradle/v8.1.1/gradle/wrapper/gradle-wrapper.jar" \
-            -O gradle/wrapper/gradle-wrapper.jar || \
-          gradle wrapper --gradle-version 8.1.1
-          chmod +x gradlew
-          ls -lh gradle/wrapper/
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.1.1'
 
       - name: Download YOLOv8n TFLite model
         run: |
@@ -49,22 +43,13 @@ jobs:
             -storepass objectlens123 -keypass objectlens123 \
             -dname "CN=ObjectLens,OU=Dev,O=ObjectLens,L=Colombo,S=WP,C=LK"
 
-      - name: Cache Gradle packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: gradle assembleDebug --stacktrace
+        working-directory: ${{ github.workspace }}
 
       - name: Build Release APK signed
         run: |
-          ./gradlew assembleRelease \
+          gradle assembleRelease \
             -Pandroid.injected.signing.store.file=$(pwd)/objectlens.keystore \
             -Pandroid.injected.signing.store.password=objectlens123 \
             -Pandroid.injected.signing.key.alias=objectlens \
